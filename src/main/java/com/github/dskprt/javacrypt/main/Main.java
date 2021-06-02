@@ -4,26 +4,25 @@ import com.beust.jcommander.JCommander;
 import com.beust.jcommander.Parameter;
 import com.beust.jcommander.ParameterException;
 import com.beust.jcommander.Parameters;
-import com.github.dskprt.javacrypt.classloaders.ByteArrayClassLoader;
+import com.github.dskprt.javacrypt.classloaders.ByteClassLoader;
 import com.github.dskprt.javacrypt.encryption.AES;
-import org.javatuples.Pair;
+import org.apache.commons.io.FilenameUtils;
+import org.apache.commons.io.IOUtils;
 
 import javax.crypto.BadPaddingException;
 import javax.crypto.IllegalBlockSizeException;
 import javax.crypto.NoSuchPaddingException;
-import java.io.IOException;
-import java.lang.reflect.InvocationTargetException;
+import java.io.*;
 import java.lang.reflect.Method;
 import java.nio.charset.Charset;
-import java.nio.file.Files;
-import java.nio.file.Paths;
-import java.security.InvalidAlgorithmParameterException;
-import java.security.InvalidKeyException;
-import java.security.NoSuchAlgorithmException;
-import java.util.ArrayList;
-import java.util.List;
+import java.security.*;
+import java.util.*;
+import java.util.jar.JarEntry;
+import java.util.jar.JarFile;
 import java.util.logging.Level;
 import java.util.logging.Logger;
+import java.util.zip.ZipEntry;
+import java.util.zip.ZipOutputStream;
 
 public class Main {
 
@@ -59,65 +58,142 @@ public class Main {
 
         switch(jc.getParsedCommand()) {
             case "encrypt":
-                byte[] bytes;
+                JarFile jar;
+                ZipOutputStream newJar;
 
                 try {
-                    bytes = Files.readAllBytes(Paths.get(encrypt.jar));
+                    jar = new JarFile(encrypt.jar);
+                    newJar = new ZipOutputStream(new FileOutputStream(FilenameUtils.removeExtension(encrypt.jar) + "-encrypted.jar"));
                 } catch(IOException e) {
-                    LOGGER.log(Level.SEVERE, "Could not read the file.", e);
+                    LOGGER.log(Level.SEVERE, "Could not read the file", e);
                     return;
                 }
 
-                Pair<byte[], String> encrypted;
+                Enumeration<JarEntry> entries = jar.entries();
+                byte[] iv = AES.createIV();
 
-                try {
-                    encrypted = AES.encrypt(bytes, encrypt.key, Charset.forName(encrypt.charset));
-                } catch(BadPaddingException | IllegalBlockSizeException | NoSuchAlgorithmException |
-                        NoSuchPaddingException | InvalidAlgorithmParameterException | InvalidKeyException e) {
+                while(entries.hasMoreElements()) {
+                    JarEntry entry = entries.nextElement();
 
-                    LOGGER.log(Level.SEVERE, "Could not encrypt the file.", e);
-                    return;
+                    if(entry.getName().endsWith(".class")) {
+                        String clsName = entry.getName().replace(".class", "").replace("/", ".");
+
+                        LOGGER.log(Level.FINE, "Encrypting class \"" + clsName + "\"...");
+
+                        try {
+                            byte[] cls = IOUtils.toByteArray(jar.getInputStream(entry));
+                            byte[] encrypted = AES.encrypt(cls, encrypt.key, iv, Charset.forName(encrypt.charset));
+
+                            newJar.putNextEntry(new ZipEntry(entry.getName()));
+                            newJar.write(encrypted);
+                            newJar.closeEntry();
+                        } catch(IOException | BadPaddingException | IllegalBlockSizeException | NoSuchAlgorithmException |
+                                NoSuchPaddingException | InvalidAlgorithmParameterException | InvalidKeyException e) {
+
+                            LOGGER.log(Level.WARNING, "Could not encrypt class \"" + clsName + "\".", e);
+                        }
+                    } else {
+                        try {
+                            newJar.putNextEntry(new ZipEntry(entry.getName()));
+                            newJar.write(IOUtils.toByteArray(jar.getInputStream(entry)));
+                            newJar.closeEntry();
+                        } catch(IOException e) {
+                            LOGGER.log(Level.WARNING, "Could not write resource \"" + entry.getName() + "\".", e);
+                        }
+                    }
                 }
 
                 try {
-                    Files.write(Paths.get(encrypt.jar), encrypted.getValue0());
+                    jar.close();
+                    newJar.close();
                 } catch(IOException e) {
-                    LOGGER.log(Level.SEVERE, "Could not write the file.", e);
-                    return;
+                    LOGGER.log(Level.WARNING, "Could not close the file.", e);
                 }
 
-                LOGGER.info("IV: " + encrypted.getValue1());
+                LOGGER.info("IV: " + Base64.getEncoder().encodeToString(iv));
                 LOGGER.info("Finished.");
                 break;
             case "launch":
+//                File temp;
+
                 try {
-                    bytes = Files.readAllBytes(Paths.get(launch.jar));
+//                    temp = File.createTempFile(UUID.randomUUID().toString(), ".tmp");
+//
+//                    DataOutputStream dos = new DataOutputStream(new FileOutputStream(temp));
+//                    dos.write(IOUtils.toByteArray(new FileInputStream(launch.jar)));
+//                    dos.writeByte(0x50);
+//                    dos.writeByte(0x4b);
+//                    dos.writeByte(0x05);
+//                    dos.writeByte(0x06);
+//                    dos.writeShort(0);
+//                    dos.writeShort(0);
+//                    dos.writeShort(0);
+//                    dos.writeShort(0);
+//                    dos.writeInt(0);
+//                    dos.writeInt(0);
+//
+//                    String comment = "shit yourself";
+//                    byte[] commentBytes = comment.getBytes(StandardCharsets.UTF_8);
+//
+//                    dos.writeShort(commentBytes.length);
+//                    dos.write(commentBytes);
+//
+//                    jar = new JarFile(temp);
+
+                    jar = new JarFile(launch.jar);
                 } catch(IOException e) {
-                    LOGGER.log(Level.SEVERE, "Could not read the file.", e);
+                    LOGGER.log(Level.SEVERE, "Could not read the file", e);
                     return;
                 }
 
-                byte[] decrypted;
+                entries = jar.entries();
 
-                try {
-                    decrypted = AES.decrypt(bytes, launch.key, Charset.forName(launch.charset), launch.iv);
-                } catch(NoSuchPaddingException | NoSuchAlgorithmException | BadPaddingException |
-                        IllegalBlockSizeException | InvalidAlgorithmParameterException | InvalidKeyException e) {
+                HashMap<String, byte[]> classes = new HashMap<>();
+                HashMap<String, byte[]> resources = new HashMap<>();
 
-                    LOGGER.log(Level.SEVERE, "Could not decrypt the file.", e);
-                    return;
+                while(entries.hasMoreElements()) {
+                    JarEntry entry = entries.nextElement();
+
+                    if(entry.getName().endsWith(".class")) {
+                        String clsName = entry.getName().replace(".class", "").replace("/", ".");
+
+                        LOGGER.log(Level.FINE, "Decrypting class \"" + clsName + "\"...");
+
+                        try {
+                            byte[] cls = IOUtils.toByteArray(jar.getInputStream(entry));
+                            byte[] decrypted = AES.decrypt(cls, launch.key, Base64.getDecoder().decode(launch.iv),
+                                    Charset.forName(launch.charset));
+
+                            classes.put(FilenameUtils.removeExtension(entry.getName()), decrypted);
+                        } catch(IOException | BadPaddingException | IllegalBlockSizeException | NoSuchAlgorithmException |
+                                NoSuchPaddingException | InvalidAlgorithmParameterException | InvalidKeyException e) {
+
+                            LOGGER.log(Level.WARNING, "Could not decrypt class \"" + clsName + "\".", e);
+                        }
+                    } else {
+                        try {
+                            resources.put(entry.getName(), IOUtils.toByteArray(jar.getInputStream(entry)));
+                        } catch(IOException e) {
+                            LOGGER.log(Level.WARNING, "Could not read resource \"" + entry.getName() + "\".", e);
+                        }
+                    }
                 }
 
                 try {
-                    ByteArrayClassLoader classLoader = new ByteArrayClassLoader(decrypted);
+                    jar.close();
+                    //temp.delete();
+                } catch(IOException e) {
+                    LOGGER.log(Level.WARNING, "Could not close the file.", e);
+                }
 
-                    Class<?> cls = classLoader.loadClass(launch.main, true);
+                ByteClassLoader classLoader = new ByteClassLoader(jar, classes, resources);
+
+                try {
+                    Class<?> cls = classLoader.loadClass(launch.main);
                     Method m = cls.getDeclaredMethod("main", String[].class);
                     m.invoke(null, new Object[] { launch.args.toArray(new String[0]) });
-                } catch(IOException | InvocationTargetException | NoSuchMethodException | IllegalAccessException |
-                        ClassNotFoundException e) {
-
-                    LOGGER.log(Level.SEVERE, "Unable to launch", e);
+                } catch(Exception e) {
+                    LOGGER.log(Level.SEVERE, "Unable to launch.", e);
                 }
                 break;
         }

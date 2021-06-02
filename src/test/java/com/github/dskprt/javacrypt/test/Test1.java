@@ -10,7 +10,7 @@ public class Test1 {
     public static void main(String[] args) {
         System.out.println("Hello world!");
 
-        URL url = Test1.class.getResource("/test.txt");
+        URL url = Test1.class.getResource("test.txt");
         InputStream in = null;
 
         try {
